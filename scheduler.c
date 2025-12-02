@@ -69,34 +69,150 @@ int getCurrentBurst(Process* proc, int current_time){
 
 int run_dispatcher(Process *procTable, size_t nprocs, int algorithm, int modality, int quantum){
 
-    Process * _proclist;
-
-    qsort(procTable,nprocs,sizeof(Process),compareArrival);
+    // Ordenamos procesos por llegada
+    qsort(procTable, nprocs, sizeof(Process), compareArrival);
 
     init_queue();
-    size_t duration = getTotalCPU(procTable, nprocs) +1;
 
-    for (int p=0; p<nprocs; p++ ){
-        procTable[p].lifecycle = malloc( duration * sizeof(int));
-        for(int t=0; t<duration; t++){
-            procTable[p].lifecycle[t]=-1;
+    // Duración segura: sum(burst) + max(arrive_time) + margen
+    int max_arrive = 0;
+    for (size_t i = 0; i < nprocs; i++){
+        if (procTable[i].arrive_time > max_arrive)
+            max_arrive = procTable[i].arrive_time;
+    }
+    size_t duration = getTotalCPU(procTable, nprocs) + max_arrive + 2;
+
+    // Inicializamos lifecycle y métricas
+    for (size_t p = 0; p < nprocs; p++ ){
+        procTable[p].lifecycle = malloc(duration * sizeof(int));
+        for (size_t t = 0; t < duration; t++){
+            procTable[p].lifecycle[t] = -1;
         }
-        procTable[p].waiting_time = 0;
-        procTable[p].return_time = 0;
-        procTable[p].response_time = 0;
-        procTable[p].completed = false;
+        procTable[p].waiting_time  = 0;
+        procTable[p].return_time   = 0;
+        procTable[p].response_time = -1;   // -1 = aún no ha usado CPU
+        procTable[p].completed     = false;
     }
 
-    printSimulation(nprocs,procTable,duration);
+    size_t finished = 0;
+    size_t t = 0;
 
-    for (int p=0; p<nprocs; p++ ){
+    Process *current = NULL;
+    int qleft = quantum;   // quantum restante (solo RR)
+
+    // Bucle principal de simulación
+    while (finished < nprocs){
+
+        // 1) llegan procesos a la cola
+        for (size_t p = 0; p < nprocs; p++){
+            if (procTable[p].arrive_time == (int)t){
+                enqueue(&procTable[p]);
+            }
+        }
+
+        // 2) selección de proceso según algoritmo
+        if (algorithm == FCFS){
+
+            // FCFS siempre nonpreemptive
+            if (current == NULL){
+                current = dequeue();
+                if (current != NULL && current->response_time < 0){
+                    current->response_time = (int)t - current->arrive_time;
+                }
+            }
+
+        } else if (algorithm == RR){
+
+            // Round Robin (preemptive con quantum)
+            if (current == NULL){
+                current = dequeue();
+                qleft = quantum; // nuevo turno
+                if (current != NULL && current->response_time < 0){
+                    current->response_time = (int)t - current->arrive_time;
+                }
+            }
+
+        } else {
+            // continuad por aqui vuestro código (biel y pol)
+            // - SJF (nonpreemptive)
+            // - SRTF (preemptive)
+            // - PRIORITIES (preemptive / nonpreemptive)
+            //
+            // Para no bloquear, si CPU libre usamos FCFS básico:
+            if (current == NULL){
+                current = dequeue();
+                if (current != NULL && current->response_time < 0){
+                    current->response_time = (int)t - current->arrive_time;
+                }
+            }
+        }
+
+        // 3) marcar estados en lifecycle en este tick t
+        for (size_t p = 0; p < nprocs; p++){
+            Process *P = &procTable[p];
+
+            if (P->completed){
+                P->lifecycle[t] = Finished;
+            } else if ((int)t < P->arrive_time){
+                P->lifecycle[t] = -1; // aún no ha llegado
+            } else if (current == P){
+                P->lifecycle[t] = Running;
+            } else {
+                P->lifecycle[t] = Ready;
+            }
+        }
+
+        // 4) actualizar ejecución / fin / expulsión RR
+        if (current != NULL){
+
+            if (algorithm == RR){
+                qleft--;  // consumimos quantum
+            }
+
+            int executed = getCurrentBurst(current, (int)t + 1);
+
+            // ¿terminó el proceso?
+            if (executed >= current->burst){
+                current->completed   = true;
+                current->return_time = (int)(t + 1) - current->arrive_time;
+                finished++;
+                current = NULL;
+                qleft = quantum;
+
+            } else if (algorithm == RR && qleft == 0){
+                // no terminó y se acabó quantum por llo tanto expulsión
+                enqueue(current);
+                current = NULL;
+                qleft = quantum;
+            }
+        }
+
+        t++;
+        if (t >= duration) break; // seguridad
+    }
+
+    // 5) calcular waiting_time como num de ticks en Ready
+    for (size_t p = 0; p < nprocs; p++){
+        int waiting = 0;
+        for (size_t k = 0; k < t; k++){
+            if (procTable[p].lifecycle[k] == Ready) waiting++;
+        }
+        procTable[p].waiting_time = waiting;
+    }
+
+    // 6) imprimir simulación y métricas
+    printSimulation(nprocs, procTable, t);
+    printMetrics(t, nprocs, procTable);
+
+    // 7) liberar memoria
+    for (size_t p = 0; p < nprocs; p++ ){
         destroyProcess(procTable[p]);
     }
 
     cleanQueue();
     return EXIT_SUCCESS;
-
 }
+
 
 
 void printSimulation(size_t nprocs, Process *procTable, size_t duration){
