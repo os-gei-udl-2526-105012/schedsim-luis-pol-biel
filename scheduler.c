@@ -16,15 +16,15 @@ int num_modalities() {
 
 size_t initFromCSVFile(char* filename, Process** procTable){
     FILE* f = fopen(filename,"r");
-    
+
     size_t procTableSize = 10;
-    
+
     *procTable = malloc(procTableSize * sizeof(Process));
     Process * _procTable = *procTable;
 
     if(f == NULL){
-      perror("initFromCSVFile():::Error Opening File:::");   
-      exit(1);             
+      perror("initFromCSVFile():::Error Opening File:::");
+      exit(1);
     }
 
     char* line = NULL;
@@ -37,10 +37,9 @@ size_t initFromCSVFile(char* filename, Process** procTable){
             if (nprocs==procTableSize-1){
                 procTableSize=procTableSize+procTableSize;
                 Process *tmp = realloc(_procTable, procTableSize * sizeof(Process));
-if (tmp == NULL) { perror("realloc"); exit(1); }
-_procTable = tmp;
-*procTable = _procTable;
-
+                if (tmp == NULL) { perror("realloc"); exit(1); }
+                _procTable = tmp;
+                *procTable = _procTable;
             }
 
             _procTable[nprocs]=p;
@@ -71,6 +70,28 @@ int getCurrentBurst(Process* proc, int current_time){
     return burst;
 }
 
+/* -------------------- Persona 2: SJF + SRT helpers -------------------- */
+static int g_now = 0;
+
+static int remaining_at(const Process *p, int now){
+    int executed = getCurrentBurst((Process*)p, now);
+    int rem = p->burst - executed;
+    return rem < 0 ? 0 : rem;
+}
+
+static int compareRemaining(const void *a, const void *b){
+    const Process *p1 = (const Process *)a;
+    const Process *p2 = (const Process *)b;
+
+    int r1 = remaining_at(p1, g_now);
+    int r2 = remaining_at(p2, g_now);
+
+    if (r1 > r2) return 1;
+    if (r1 < r2) return -1;
+    return compareArrival(p1, p2); // desempate
+}
+/* --------------------------------------------------------------------- */
+
 int run_dispatcher(Process *procTable, size_t nprocs, int algorithm, int modality, int quantum){
 
     // Ordenamos procesos por llegada
@@ -84,7 +105,7 @@ int run_dispatcher(Process *procTable, size_t nprocs, int algorithm, int modalit
         if (procTable[i].arrive_time > max_arrive)
             max_arrive = procTable[i].arrive_time;
     }
-    size_t duration = getTotalCPU(procTable, nprocs) + max_arrive + 2;
+    size_t duration = getTotalCPU(procTable, nprocs) + (size_t)max_arrive + 2;
 
     // Inicializamos lifecycle y métricas
     for (size_t p = 0; p < nprocs; p++ ){
@@ -136,66 +157,109 @@ int run_dispatcher(Process *procTable, size_t nprocs, int algorithm, int modalit
                 }
             }
 
-       } else if (algorithm == SJF) {
+        } else if (algorithm == SJF) {
 
-    // TODO Persona 2: implementar SJF (nonpreemptive)
+            if (modality == NONPREEMPTIVE) {
 
-} else if (algorithm == SRTF) {
+                // SJF nonpreemptive: decide solo cuando CPU libre
+                if (current == NULL) {
 
-    // TODO Persona 2: implementar SRTF (preemptive)
+                    size_t nready = get_queue_size();
+                    if (nready > 1) {
+                        Process *list = transformQueueToList();
+                        qsort(list, nready, sizeof(Process), compareBurst);
+                        setQueueFromList(list);
+                        free(list);
+                    }
 
-} else if (algorithm == PRIORITIES) {
-
-
-    if (modality == NONPREEMPTIVE) {
-
-        // PRIORITIES nonpreemptive: solo decide cuando CPU libre
-        if (current == NULL) {
-
-            size_t nready = get_queue_size();
-            if (nready > 1) {
-                Process *list = transformQueueToList();
-                qsort(list, nready, sizeof(Process), comparePriority);
-                setQueueFromList(list);
-                free(list);
-            }
-
-            current = dequeue();
-            if (current != NULL && current->response_time < 0) {
-                current->response_time = (int)t - current->arrive_time;
-            }
-        }
-
-    } else { 
-
-        // PRIORITIES preemptive: cada tick compara prioridades
-        size_t nready = get_queue_size();
-
-        if (nready > 0) {
-            Process *list = transformQueueToList();
-            qsort(list, nready, sizeof(Process), comparePriority);
-
-            int should_preempt =
-                (current == NULL) ||
-                (comparePriority(&list[0], current) < 0);
-
-            setQueueFromList(list);
-            free(list);
-
-            if (should_preempt) {
-                if (current != NULL) {
-                    enqueue(current);
+                    current = dequeue();
+                    if (current != NULL && current->response_time < 0) {
+                        current->response_time = (int)t - current->arrive_time;
+                    }
                 }
 
-                current = dequeue();
-                if (current != NULL && current->response_time < 0) {
-                    current->response_time = (int)t - current->arrive_time;
+            } else {
+
+                // SRT (SJF preemptive): compara remaining y puede expulsar
+                size_t nready = get_queue_size();
+
+                if (nready > 0) {
+                    Process *list = transformQueueToList();
+
+                    g_now = (int)t;
+                    qsort(list, nready, sizeof(Process), compareRemaining);
+
+                    int should_preempt =
+                        (current == NULL) ||
+                        (remaining_at(&list[0], (int)t) < remaining_at(current, (int)t));
+
+                    setQueueFromList(list);
+                    free(list);
+
+                    if (should_preempt) {
+                        if (current != NULL) {
+                            enqueue(current);
+                        }
+                        current = dequeue();
+                        if (current != NULL && current->response_time < 0) {
+                            current->response_time = (int)t - current->arrive_time;
+                        }
+                    }
+                } else if (current == NULL) {
+                    current = NULL;
+                }
+            }
+
+        } else if (algorithm == PRIORITIES) {
+
+            if (modality == NONPREEMPTIVE) {
+
+                // PRIORITIES nonpreemptive: solo decide cuando CPU libre
+                if (current == NULL) {
+
+                    size_t nready = get_queue_size();
+                    if (nready > 1) {
+                        Process *list = transformQueueToList();
+                        qsort(list, nready, sizeof(Process), comparePriority);
+                        setQueueFromList(list);
+                        free(list);
+                    }
+
+                    current = dequeue();
+                    if (current != NULL && current->response_time < 0) {
+                        current->response_time = (int)t - current->arrive_time;
+                    }
+                }
+
+            } else {
+
+                // PRIORITIES preemptive: cada tick compara prioridades
+                size_t nready = get_queue_size();
+
+                if (nready > 0) {
+                    Process *list = transformQueueToList();
+                    qsort(list, nready, sizeof(Process), comparePriority);
+
+                    int should_preempt =
+                        (current == NULL) ||
+                        (comparePriority(&list[0], current) < 0);
+
+                    setQueueFromList(list);
+                    free(list);
+
+                    if (should_preempt) {
+                        if (current != NULL) {
+                            enqueue(current);
+                        }
+
+                        current = dequeue();
+                        if (current != NULL && current->response_time < 0) {
+                            current->response_time = (int)t - current->arrive_time;
+                        }
+                    }
                 }
             }
         }
-    }
-}
-
 
         // 3) marcar estados en lifecycle en este tick t
         for (size_t p = 0; p < nprocs; p++){
@@ -230,7 +294,7 @@ int run_dispatcher(Process *procTable, size_t nprocs, int algorithm, int modalit
                 qleft = quantum;
 
             } else if (algorithm == RR && qleft == 0){
-                // no terminó y se acabó quantum por llo tanto expulsión
+                // no terminó y se acabó quantum por lo tanto expulsión
                 enqueue(current);
                 current = NULL;
                 qleft = quantum;
@@ -263,8 +327,6 @@ int run_dispatcher(Process *procTable, size_t nprocs, int algorithm, int modalit
     return EXIT_SUCCESS;
 }
 
-
-
 void printSimulation(size_t nprocs, Process *procTable, size_t duration){
 
     printf("%14s","== SIMULATION ");
@@ -283,15 +345,13 @@ void printSimulation(size_t nprocs, Process *procTable, size_t duration){
         Process current = procTable[p];
             printf ("|%4s", current.name);
             for(int t=0; t<duration; t++){
-                printf("|%2s",  (current.lifecycle[t]==Running ? "E" : 
-                        current.lifecycle[t]==Bloqued ? "B" :   
+                printf("|%2s",  (current.lifecycle[t]==Running ? "E" :
+                        current.lifecycle[t]==Bloqued ? "B" :
                         current.lifecycle[t]==Finished ? "F" : " "));
             }
             printf ("|\n");
-        
+
     }
-
-
 }
 
 void printMetrics(size_t simulationCPUTime, size_t nprocs, Process *procTable ){
@@ -324,10 +384,8 @@ void printMetrics(size_t simulationCPUTime, size_t nprocs, Process *procTable ){
             averageReturnTimeN += procTable[p].return_time / (double) procTable[p].burst;
     }
 
-
     printf("= averageWaitingTime: %lf\n", (averageWaitingTime/(double) nprocs) );
     printf("= averageResponseTime: %lf\n", (averageResponseTime/(double) nprocs) );
     printf("= averageReturnTimeN: %lf\n", (averageReturnTimeN/(double) nprocs) );
     printf("= averageReturnTime: %lf\n", (averageReturnTime/(double) nprocs) );
-
 }
