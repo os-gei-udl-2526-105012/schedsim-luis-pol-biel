@@ -36,7 +36,11 @@ size_t initFromCSVFile(char* filename, Process** procTable){
 
             if (nprocs==procTableSize-1){
                 procTableSize=procTableSize+procTableSize;
-                _procTable=realloc(_procTable, procTableSize * sizeof(Process));
+                Process *tmp = realloc(_procTable, procTableSize * sizeof(Process));
+if (tmp == NULL) { perror("realloc"); exit(1); }
+_procTable = tmp;
+*procTable = _procTable;
+
             }
 
             _procTable[nprocs]=p;
