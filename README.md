@@ -68,7 +68,7 @@ S'ha d'especificar l'algorisme, la modalitat i el fitxer de dades:
 
 ```
 
-```bash
+```text
 
 Exemples d'ús:
 
@@ -81,6 +81,7 @@ Round Robin: ./main -a rr -m preemptive -f process.csv
 ```
 
 ## Sortida del programa
+```text
 1. SIMULATION (Diagrama de Gantt)
 Es mostra una graella temporal on:
 
@@ -110,6 +111,8 @@ Temps mitjà d'espera (Average Waiting Time).
 Temps mitjà de resposta (Average Response Time).
 
 Temps mitjà de retorn (Average Turnaround Time).
+
+```
 
 # Autors
 ## Projecte realitzat per:
