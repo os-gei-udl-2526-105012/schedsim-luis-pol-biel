@@ -16,15 +16,15 @@ int num_modalities() {
 
 size_t initFromCSVFile(char* filename, Process** procTable){
     FILE* f = fopen(filename,"r");
-    
+
     size_t procTableSize = 10;
-    
+
     *procTable = malloc(procTableSize * sizeof(Process));
     Process * _procTable = *procTable;
 
     if(f == NULL){
-      perror("initFromCSVFile():::Error Opening File:::");   
-      exit(1);             
+      perror("initFromCSVFile():::Error Opening File:::");
+      exit(1);
     }
 
     char* line = NULL;
@@ -36,7 +36,10 @@ size_t initFromCSVFile(char* filename, Process** procTable){
 
             if (nprocs==procTableSize-1){
                 procTableSize=procTableSize+procTableSize;
-                _procTable=realloc(_procTable, procTableSize * sizeof(Process));
+                Process *tmp = realloc(_procTable, procTableSize * sizeof(Process));
+                if (tmp == NULL) { perror("realloc"); exit(1); }
+                _procTable = tmp;
+                *procTable = _procTable;
             }
 
             _procTable[nprocs]=p;
@@ -67,37 +70,262 @@ int getCurrentBurst(Process* proc, int current_time){
     return burst;
 }
 
+/* -------------------- Persona 2: SJF + SRT helpers -------------------- */
+static int g_now = 0;
+
+static int remaining_at(const Process *p, int now){
+    int executed = getCurrentBurst((Process*)p, now);
+    int rem = p->burst - executed;
+    return rem < 0 ? 0 : rem;
+}
+
+static int compareRemaining(const void *a, const void *b){
+    const Process *p1 = (const Process *)a;
+    const Process *p2 = (const Process *)b;
+
+    int r1 = remaining_at(p1, g_now);
+    int r2 = remaining_at(p2, g_now);
+
+    if (r1 > r2) return 1;
+    if (r1 < r2) return -1;
+    return compareArrival(p1, p2); // desempate
+}
+/* --------------------------------------------------------------------- */
+
 int run_dispatcher(Process *procTable, size_t nprocs, int algorithm, int modality, int quantum){
 
-    Process * _proclist;
-
-    qsort(procTable,nprocs,sizeof(Process),compareArrival);
+    // Ordenamos procesos por llegada
+    qsort(procTable, nprocs, sizeof(Process), compareArrival);
 
     init_queue();
-    size_t duration = getTotalCPU(procTable, nprocs) +1;
 
-    for (int p=0; p<nprocs; p++ ){
-        procTable[p].lifecycle = malloc( duration * sizeof(int));
-        for(int t=0; t<duration; t++){
-            procTable[p].lifecycle[t]=-1;
+    // Duración segura: sum(burst) + max(arrive_time) + margen
+    int max_arrive = 0;
+    for (size_t i = 0; i < nprocs; i++){
+        if (procTable[i].arrive_time > max_arrive)
+            max_arrive = procTable[i].arrive_time;
+    }
+    size_t duration = getTotalCPU(procTable, nprocs) + (size_t)max_arrive + 2;
+
+    // Inicializamos lifecycle y métricas
+    for (size_t p = 0; p < nprocs; p++ ){
+        procTable[p].lifecycle = malloc(duration * sizeof(int));
+        for (size_t t = 0; t < duration; t++){
+            procTable[p].lifecycle[t] = -1;
         }
-        procTable[p].waiting_time = 0;
-        procTable[p].return_time = 0;
-        procTable[p].response_time = 0;
-        procTable[p].completed = false;
+        procTable[p].waiting_time  = 0;
+        procTable[p].return_time   = 0;
+        procTable[p].response_time = -1;   // -1 = aún no ha usado CPU
+        procTable[p].completed     = false;
     }
 
-    printSimulation(nprocs,procTable,duration);
+    size_t finished = 0;
+    size_t t = 0;
 
-    for (int p=0; p<nprocs; p++ ){
+    Process *current = NULL;
+    int qleft = quantum;   // quantum restante (solo RR)
+
+    // Bucle principal de simulación
+    while (finished < nprocs){
+
+        // 1) llegan procesos a la cola
+        for (size_t p = 0; p < nprocs; p++){
+            if (procTable[p].arrive_time == (int)t){
+                enqueue(&procTable[p]);
+            }
+        }
+
+        // 2) selección de proceso según algoritmo
+        if (algorithm == FCFS){
+
+            // FCFS siempre nonpreemptive
+            if (current == NULL){
+                current = dequeue();
+                if (current != NULL && current->response_time < 0){
+                    current->response_time = (int)t - current->arrive_time;
+                }
+            }
+
+        } else if (algorithm == RR){
+
+            // Round Robin (preemptive con quantum)
+            if (current == NULL){
+                current = dequeue();
+                qleft = quantum; // nuevo turno
+                if (current != NULL && current->response_time < 0){
+                    current->response_time = (int)t - current->arrive_time;
+                }
+            }
+
+        } else if (algorithm == SJF) {
+
+            if (modality == NONPREEMPTIVE) {
+
+                // SJF nonpreemptive: decide solo cuando CPU libre
+                if (current == NULL) {
+
+                    size_t nready = get_queue_size();
+                    if (nready > 1) {
+                        Process *list = transformQueueToList();
+                        qsort(list, nready, sizeof(Process), compareBurst);
+                        setQueueFromList(list);
+                        free(list);
+                    }
+
+                    current = dequeue();
+                    if (current != NULL && current->response_time < 0) {
+                        current->response_time = (int)t - current->arrive_time;
+                    }
+                }
+
+            } else {
+
+                // SRT (SJF preemptive): compara remaining y puede expulsar
+                size_t nready = get_queue_size();
+
+                if (nready > 0) {
+                    Process *list = transformQueueToList();
+
+                    g_now = (int)t;
+                    qsort(list, nready, sizeof(Process), compareRemaining);
+
+                    int should_preempt =
+                        (current == NULL) ||
+                        (remaining_at(&list[0], (int)t) < remaining_at(current, (int)t));
+
+                    setQueueFromList(list);
+                    free(list);
+
+                    if (should_preempt) {
+                        if (current != NULL) {
+                            enqueue(current);
+                        }
+                        current = dequeue();
+                        if (current != NULL && current->response_time < 0) {
+                            current->response_time = (int)t - current->arrive_time;
+                        }
+                    }
+                } else if (current == NULL) {
+                    current = NULL;
+                }
+            }
+
+        } else if (algorithm == PRIORITIES) {
+
+            if (modality == NONPREEMPTIVE) {
+
+                // PRIORITIES nonpreemptive: solo decide cuando CPU libre
+                if (current == NULL) {
+
+                    size_t nready = get_queue_size();
+                    if (nready > 1) {
+                        Process *list = transformQueueToList();
+                        qsort(list, nready, sizeof(Process), comparePriority);
+                        setQueueFromList(list);
+                        free(list);
+                    }
+
+                    current = dequeue();
+                    if (current != NULL && current->response_time < 0) {
+                        current->response_time = (int)t - current->arrive_time;
+                    }
+                }
+
+            } else {
+
+                // PRIORITIES preemptive: cada tick compara prioridades
+                size_t nready = get_queue_size();
+
+                if (nready > 0) {
+                    Process *list = transformQueueToList();
+                    qsort(list, nready, sizeof(Process), comparePriority);
+
+                    int should_preempt =
+                        (current == NULL) ||
+                        (comparePriority(&list[0], current) < 0);
+
+                    setQueueFromList(list);
+                    free(list);
+
+                    if (should_preempt) {
+                        if (current != NULL) {
+                            enqueue(current);
+                        }
+
+                        current = dequeue();
+                        if (current != NULL && current->response_time < 0) {
+                            current->response_time = (int)t - current->arrive_time;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3) marcar estados en lifecycle en este tick t
+        for (size_t p = 0; p < nprocs; p++){
+            Process *P = &procTable[p];
+
+            if (P->completed){
+                P->lifecycle[t] = Finished;
+            } else if ((int)t < P->arrive_time){
+                P->lifecycle[t] = -1; // aún no ha llegado
+            } else if (current == P){
+                P->lifecycle[t] = Running;
+            } else {
+                P->lifecycle[t] = Ready;
+            }
+        }
+
+        // 4) actualizar ejecución / fin / expulsión RR
+        if (current != NULL){
+
+            if (algorithm == RR){
+                qleft--;  // consumimos quantum
+            }
+
+            int executed = getCurrentBurst(current, (int)t + 1);
+
+            // ¿terminó el proceso?
+            if (executed >= current->burst){
+                current->completed   = true;
+                current->return_time = (int)(t + 1) - current->arrive_time;
+                finished++;
+                current = NULL;
+                qleft = quantum;
+
+            } else if (algorithm == RR && qleft == 0){
+                // no terminó y se acabó quantum por lo tanto expulsión
+                enqueue(current);
+                current = NULL;
+                qleft = quantum;
+            }
+        }
+
+        t++;
+        if (t >= duration) break; // seguridad
+    }
+
+    // 5) calcular waiting_time como num de ticks en Ready
+    for (size_t p = 0; p < nprocs; p++){
+        int waiting = 0;
+        for (size_t k = 0; k < t; k++){
+            if (procTable[p].lifecycle[k] == Ready) waiting++;
+        }
+        procTable[p].waiting_time = waiting;
+    }
+
+    // 6) imprimir simulación y métricas
+    printSimulation(nprocs, procTable, t);
+    printMetrics(t, nprocs, procTable);
+
+    // 7) liberar memoria
+    for (size_t p = 0; p < nprocs; p++ ){
         destroyProcess(procTable[p]);
     }
 
     cleanQueue();
     return EXIT_SUCCESS;
-
 }
-
 
 void printSimulation(size_t nprocs, Process *procTable, size_t duration){
 
@@ -117,15 +345,13 @@ void printSimulation(size_t nprocs, Process *procTable, size_t duration){
         Process current = procTable[p];
             printf ("|%4s", current.name);
             for(int t=0; t<duration; t++){
-                printf("|%2s",  (current.lifecycle[t]==Running ? "E" : 
-                        current.lifecycle[t]==Bloqued ? "B" :   
+                printf("|%2s",  (current.lifecycle[t]==Running ? "E" :
+                        current.lifecycle[t]==Bloqued ? "B" :
                         current.lifecycle[t]==Finished ? "F" : " "));
             }
             printf ("|\n");
-        
+
     }
-
-
 }
 
 void printMetrics(size_t simulationCPUTime, size_t nprocs, Process *procTable ){
@@ -158,10 +384,8 @@ void printMetrics(size_t simulationCPUTime, size_t nprocs, Process *procTable ){
             averageReturnTimeN += procTable[p].return_time / (double) procTable[p].burst;
     }
 
-
     printf("= averageWaitingTime: %lf\n", (averageWaitingTime/(double) nprocs) );
     printf("= averageResponseTime: %lf\n", (averageResponseTime/(double) nprocs) );
     printf("= averageReturnTimeN: %lf\n", (averageReturnTimeN/(double) nprocs) );
     printf("= averageReturnTime: %lf\n", (averageReturnTime/(double) nprocs) );
-
 }
