@@ -136,20 +136,66 @@ int run_dispatcher(Process *procTable, size_t nprocs, int algorithm, int modalit
                 }
             }
 
-        } else {
-            // continuad por aqui vuestro código (biel y pol)
-            // - SJF (nonpreemptive)
-            // - SRTF (preemptive)
-            // - PRIORITIES (preemptive / nonpreemptive)
-            //
-            // Para no bloquear, si CPU libre usamos FCFS básico:
-            if (current == NULL){
+       } else if (algorithm == SJF) {
+
+    // TODO Persona 2: implementar SJF (nonpreemptive)
+
+} else if (algorithm == SRTF) {
+
+    // TODO Persona 2: implementar SRTF (preemptive)
+
+} else if (algorithm == PRIORITIES) {
+
+
+    if (modality == NONPREEMPTIVE) {
+
+        // PRIORITIES nonpreemptive: solo decide cuando CPU libre
+        if (current == NULL) {
+
+            size_t nready = get_queue_size();
+            if (nready > 1) {
+                Process *list = transformQueueToList();
+                qsort(list, nready, sizeof(Process), comparePriority);
+                setQueueFromList(list);
+                free(list);
+            }
+
+            current = dequeue();
+            if (current != NULL && current->response_time < 0) {
+                current->response_time = (int)t - current->arrive_time;
+            }
+        }
+
+    } else { 
+
+        // PRIORITIES preemptive: cada tick compara prioridades
+        size_t nready = get_queue_size();
+
+        if (nready > 0) {
+            Process *list = transformQueueToList();
+            qsort(list, nready, sizeof(Process), comparePriority);
+
+            int should_preempt =
+                (current == NULL) ||
+                (comparePriority(&list[0], current) < 0);
+
+            setQueueFromList(list);
+            free(list);
+
+            if (should_preempt) {
+                if (current != NULL) {
+                    enqueue(current);
+                }
+
                 current = dequeue();
-                if (current != NULL && current->response_time < 0){
+                if (current != NULL && current->response_time < 0) {
                     current->response_time = (int)t - current->arrive_time;
                 }
             }
         }
+    }
+}
+
 
         // 3) marcar estados en lifecycle en este tick t
         for (size_t p = 0; p < nprocs; p++){
